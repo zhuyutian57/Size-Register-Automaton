@@ -6,8 +6,6 @@
 #include <map>
 #include <utility>
 
-#include <fml/atl/detail/algorithm.hpp>
-#include <fml/atl/detail/automaton.hpp>
 #include <fml/ll/propositional_logic.hpp>
 
 using namespace ll;
@@ -187,14 +185,6 @@ namespace atl::detail {
         RegisterMode::COUNT : RegisterMode::IDLE);
     }
     return modes;
-  }     
-
-  typedef Property<Guard, ModesTr> SRA_TP;
-
-  SRA_TP operator&(const SRA_TP& lhs, const SRA_TP& rhs) {
-    return SRA_TP(
-      lhs.default_property & rhs.default_property,
-      lhs.extended_property & rhs.extended_property);
   }
 
 }

@@ -7,9 +7,9 @@
 namespace atl::detail {
 
   #define SRA size_register_automaton_gen
-
-  // Complement
+  
   typedef SRA::State State;
+  typedef SRA::Transition Transition;
   typedef SRA::TransitionProperty TransitionProperty;
   
   typedef Guard::Bound Bound;
@@ -17,22 +17,18 @@ namespace atl::detail {
 
   bool
   is_self_triggered(
-    const TransitionProperty& t1,
-    const TransitionProperty& t2) {
-    if(t1.default_property != t2.default_property)
-      return true;
-    const Modes& m1 = t1.extended_property.first;
-    const Modes& m2 = t2.extended_property.first;
-    const int n = m1.size();
-    assert(n == m2.size());
+    const Guard& g1, const ModesTr& mt1,
+    const Guard& g2, const ModesTr& mt2) {
+    if(g1 != g2) return true;
+    const int n = mt1.first.size();
+    assert(n == mt2.first.size());
     for(int i = 0; i < n; i++)
-      if(m1[i] != m2[i]) return true;
-    const Modes& m1p = t1.extended_property.second;
-    const Modes& m2p = t2.extended_property.second;
-    assert(n == m1p.size());
-    assert(n == m2p.size());
+      if(mt1.first[i] != mt2.first[i]) return true;
+    assert(n == mt1.second.size());
+    assert(n == mt2.second.size());
     for(int i = 0; i < n; i++)
-      if(m1[i] == RegisterMode::COUNT && m1p[i] != m2p[i])
+      if(mt1.first[i] == RegisterMode::COUNT
+          && mt1.second[i] != mt2.second[i])
         return true;
     return false;
   }
@@ -41,15 +37,16 @@ namespace atl::detail {
   intersect_bounds(const Bounds& bounds, Bound b) {
     Bounds n_bounds;
     for(auto bp : bounds) {
-      Bound nb = std::make_pair(-1, -1);
-      if(b.second == -1 && bp.second == -1)
-        nb.first = std::max(b.first, bp.first);
-      else if(b.second == -1) {
-        nb.first = std::max(b.first, bp.first);
-        nb.second = bp.second;
-      } else {
-        nb.first = std::max(b.first, bp.first);
-        nb.second = std::min(b.second, bp.second);
+      Bound nb = std::make_pair(
+        std::max(b.first, bp.first), -1);
+      if(bp.second != -1 || b.second != -1) {
+        if(b.second == -1) {
+          nb.second = bp.second;
+        } else if(bp.second == -1) {
+          nb.second = b.second;
+        } else {
+          nb.second = std::min(b.second, bp.second);
+        }
       }
       if(nb.first > nb.second) continue;
       n_bounds.push_back(nb);
@@ -65,12 +62,29 @@ namespace atl::detail {
       auto out_edge_iter = sra.out_transitions(*it);
       for(auto oet1 = out_edge_iter.first; oet1 != out_edge_iter.second; oet1++)
         for(auto oet2 = out_edge_iter.first; oet2 != out_edge_iter.second; oet2++)
-          if(oet1 != oet2)
+          if(oet1 != oet2) {
+            const Guard& g1 = sra.get_property(*oet1);
+            const Guard& g2 = sra.get_property(*oet2);
+            Modes m1 = sra.get_property(oet1->m_source);
+            Modes m1p = sra.get_property(oet1->m_target);
+            Modes m2 = sra.get_property(oet2->m_source);
+            Modes m2p = sra.get_property(oet2->m_target);
             if(!is_self_triggered(
-              sra.get_property(*oet1),
-              sra.get_property(*oet2)))
+              g1, std::make_pair(m1, m1p),
+              g2, std::make_pair(m2, m2p)))
               return false;
+          }
     }
+    return true;
+  }
+
+  bool
+  check_count_to_idle(const Modes& m1, const Modes& m2) {
+    assert(m1.size() == m2.size());
+    for(int i = 0; i < m1.size(); i++)
+      if(m1[i] == RegisterMode::IDLE &&
+          m2[i] == RegisterMode::COUNT)
+        return false;
     return true;
   }
 
@@ -81,8 +95,10 @@ namespace atl::detail {
     std::unordered_map<int, State> qm_map;
     int n_reg = sra.num_registers();
     int n_qm = (1 << n_reg);
-    for(int i = 0; i < n_qm; i++)
-      qm_map[i] = fsra.add_state();
+    for(int i = 0; i < n_qm; i++) {
+      Modes m = binary_to_modes(i, n_reg);
+      qm_map[i] = fsra.add_state(m);
+    }
     
     int_variable cur("cur");
     propositional_fomula top = cur >= 0;
@@ -96,9 +112,7 @@ namespace atl::detail {
             m2[k] == RegisterMode::COUNT)
             ok_mode_tr = false;
         if(!ok_mode_tr) continue;
-        fsra.add_transition(
-          qm_map[i], qm_map[j],
-          SRA_TP(top, std::make_pair(m1, m2)));
+        fsra.add_transition(qm_map[i], qm_map[j], top);
       }
     }
 
@@ -106,46 +120,54 @@ namespace atl::detail {
     auto state_iter_pair = sra.states();
     for(auto s_it = state_iter_pair.first;
       s_it != state_iter_pair.second; s_it++) {
+      Modes ms = sra.get_property(*s_it);
       for(int i = 0; i < n_qm; i++) {
-        Modes m1 = binary_to_modes(i, n_reg);
-        for(int j = 0; j < n_qm; j++) {
-          Modes m2 = binary_to_modes(j, n_reg);
-          SRA_TP prop(top, std::make_pair(m1, m2));
-          auto out_edge_iter = fsra.out_transitions(*s_it);
-          std::vector<Bound> bounds;
-          bounds.push_back(std::make_pair(0, -1));
-          for(auto o_it = out_edge_iter.first;
-            o_it != out_edge_iter.second && !bounds.empty(); o_it++) {
-            auto oprop = sra.get_property(*o_it);
-            if(is_self_triggered(prop, oprop)) continue;
-            Bound b = oprop.default_property.get_bounds();
-            Bounds nb1, nb2;
-            if(b.first > 0)
-              nb1 = intersect_bounds(bounds, std::make_pair(0, b.first - 1));
-            if(b.second != -1)
-              nb2 = intersect_bounds(bounds, std::make_pair(b.second + 1, -1));
-            bounds.clear();
-            for(auto nb : nb1) bounds.push_back(nb);
-            for(auto nb : nb2) bounds.push_back(nb);
-          }
-          for(auto b : bounds) {
-            Guard guard(cur >= b.first);
-            if(b.second != -1)
-              guard = guard & (cur <= b.second);
-            SRA_TP n_prop(guard, std::make_pair(m1, m2));
-            fsra.add_transition(*s_it, qm_map[j], n_prop);
-          }
+        Modes m1p = binary_to_modes(i, n_reg);
+        if(!check_count_to_idle(ms, m1p)) continue;
+        const Guard& g1 = top;
+        const ModesTr& mt1 = std::make_pair(ms, m1p);
+        auto out_edge_iter = sra.out_transitions(*s_it);
+        std::vector<Bound> bounds;
+        bounds.push_back(std::make_pair(0, -1));
+        for(auto o_it = out_edge_iter.first;
+          o_it != out_edge_iter.second && !bounds.empty(); o_it++) {
+          const Guard& g2 = sra.get_property(*o_it);
+          Modes m2p = sra.get_property(o_it->m_target);
+          if(is_self_triggered(
+            g1, mt1, g2, std::make_pair(ms, m2p)
+          )) continue;
+          Bound b = g2.get_bounds();
+          Bounds nb1, nb2;
+          if(b.first > 0)
+            nb1 = intersect_bounds(bounds, std::make_pair(0, b.first - 1));
+          if(b.second != -1)
+            nb2 = intersect_bounds(bounds, std::make_pair(b.second + 1, -1));
+          bounds.clear();
+          for(auto nb : nb1) bounds.push_back(nb);
+          for(auto nb : nb2) bounds.push_back(nb);
+        }
+        for(auto b : bounds) {
+          Guard guard(cur >= b.first);
+          if(b.second != -1)
+            guard = guard & (cur <= b.second);
+          fsra.add_transition(*s_it, qm_map[i], guard);
         }
       }
     }
     return fsra;
   }
 
+  // Complement
+  typedef size_register_automaton_gen::StateSet StateSet;
   SRA
   complement(const SRA& sra) {
     assert(is_deterministic(sra));
     SRA fsra = get_full_sra(sra);
-    // TODO
+    StateSet n_final_state_set;
+    for(auto s : fsra.state_set())
+      if(!fsra.is_final_state(s))
+        n_final_state_set.insert(s);
+    fsra.set_final_state_set(n_final_state_set);
     return fsra;
   }
 
@@ -161,11 +183,8 @@ namespace atl::detail {
           rhs.is_initial_state(sp.first.second))
         out.set_initial_state(sp.second);
       if(lhs.is_final_state(sp.first.first) &&
-          rhs.is_final_state(sp.first.second)) {
-        Modes m1 = lhs.get_final_state_modes(sp.first.first);
-        Modes m2 = rhs.get_final_state_modes(sp.first.second);
-        out.set_final_state(sp.second, m1 & m2);
-      }
+          rhs.is_final_state(sp.first.second))
+        out.set_final_state(sp.second);
     }
     return out;
   }
@@ -186,23 +205,24 @@ namespace atl::detail {
     std::unordered_map<State, State> lhs_state2state;
     std::unordered_map<State, State> rhs_state2state;
     for(auto state : lhs.state_set()) {
-      lhs_state2state[state] = out.add_state();
+      Modes m = lhs.get_property(state);
+      lhs_state2state[state] = out.add_state(m + rhs_idles);
     }
     for(auto state : rhs.state_set()) {
       if(rhs.is_initial_state(state)) continue;
-      rhs_state2state[state] = out.add_state();
+      Modes m = rhs.get_property(state);
+      rhs_state2state[state] = out.add_state(lhs_idles + m);
     }
 
     out.set_initial_state(lhs_state2state[lhs.initial_state()]);
 
-    for(auto state_modes : rhs.final_state_set()) {
-      Modes n_modes = lhs_idles + state_modes.second;
-      if(!rhs.is_initial_state(state_modes.first)) {
-        State n_state = rhs_state2state[state_modes.first];
-        out.set_final_state(n_state, n_modes);
+    for(auto final_state : rhs.final_state_set()) {
+      if(!rhs.is_initial_state(final_state)) {
+        State n_final_state = rhs_state2state[final_state];
+        out.set_final_state(n_final_state);
       } else for(auto lhs_final_state : lhs.final_state_set()) {
-        State n_state = lhs_state2state[lhs_final_state.first];
-        out.set_final_state(n_state, n_modes);
+        State n_final_state = lhs_state2state[lhs_final_state];
+        out.set_final_state(n_final_state);
       }
     }
     
@@ -211,31 +231,23 @@ namespace atl::detail {
       t_it != lhs_transition_iter.second; t_it++) {
         State ns = lhs_state2state[lhs.source(*t_it)];
         State nt = lhs_state2state[lhs.target(*t_it)];
-        TransitionProperty ntp = lhs.get_property(*t_it);
-        ntp.extended_property =
-          ntp.extended_property + std::make_pair(rhs_idles, rhs_idles);
-        out.add_transition(ns, nt, ntp); 
+        out.add_transition(ns, nt, lhs.get_property(*t_it)); 
     }
 
     auto rhs_transition_iter = rhs.transitions();
     for(auto t_it = rhs_transition_iter.first;
       t_it != rhs_transition_iter.second; t_it++) {
-        TransitionProperty ntp = rhs.get_property(*t_it);
-        ntp.extended_property =
-          std::make_pair(lhs_idles, lhs_idles) + ntp.extended_property;
-
         State s = rhs.source(*t_it);
         State t = rhs.target(*t_it);
         StateSet ns_set, nt_set;
         if(!rhs.is_initial_state(s)) ns_set.insert(rhs_state2state[s]);
         else for(auto lhs_final_state : lhs.final_state_set())
-          ns_set.insert(lhs_state2state[lhs_final_state.first]);
+          ns_set.insert(lhs_state2state[lhs_final_state]);
         if(!rhs.is_initial_state(t)) nt_set.insert(rhs_state2state[t]);
         else for(auto lhs_final_state : lhs.final_state_set())
-          nt_set.insert(lhs_state2state[lhs_final_state.first]);
-
+          nt_set.insert(lhs_state2state[lhs_final_state]);
         for(auto ns : ns_set) for(auto nt : nt_set)
-          out.add_transition(ns, nt, ntp);
+          out.add_transition(ns, nt, rhs.get_property(*t_it));
     }
 
     return out;

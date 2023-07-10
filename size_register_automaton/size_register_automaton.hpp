@@ -47,28 +47,25 @@ namespace atl {
     operator<<(std::ostream& os, const sra_type& x) {
       os << " Deterministic : " << (is_deterministic(x) ? "Yes" : "No") << std::endl;
 
-      os << " States : ";
-      for(auto s : x.state_set()) os << s << " ";
+      os << " States :\n";
+      for(auto s : x.state_set())
+        os << "    " << s << " - " << x.get_property(s) << "\n";
       os << std::endl;
 
 
       os << " Initial State : " << x.initial_state() << std::endl;
 
-      os << " Final States :\n";
-      for(auto s : x.final_state_set())
-        os << "    " << s.first << " - " << s.second << std::endl;
+      os << " Final States : ";
+      for(auto s : x.final_state_set()) os << s << " ";
+      os << std::endl;
 
       os << " Transitions :\n";
       auto transition_iter = x.transitions();
       for(auto t_it = transition_iter.first; t_it != transition_iter.second; t_it++) {
-        State s = x.source(*t_it);
-        State t = x.target(*t_it);
+        State s = x.source(*t_it); Modes ms = x.get_property(s);
+        State t = x.target(*t_it); Modes mt = x.get_property(t);
         TransitionProperty prop = x.get_property(*t_it);
-        os << "   " << s << " "
-           << prop.default_property << " "
-           << prop.extended_property.first << " "
-           << t << " " << prop.extended_property.second << " "
-           << std::endl;
+        os << "   " << s << " " << ms << " " << prop << " " << t << " " << mt << std::endl;
       }
       os << std::endl;
       return os;
