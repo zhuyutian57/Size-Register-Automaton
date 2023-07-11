@@ -1,5 +1,7 @@
 #include <iostream>
 #include <string>
+#include <set>
+#include <vector>
 
 #include <boost/graph/adjacency_list.hpp>
 
@@ -19,32 +21,56 @@ typedef size_register_automaton::TransitionProperty TransitionProperty;
 int main() {
 
   int_variable cur("cur");
-  Guard g1(cur >= 0);
-  Guard g2(cur >= 1);
+  Guard top(cur >= 0);
+  Guard g2(cur >= 2);
+  Guard g3(cur >= 3);
   
-  Modes mi; mi.push_back(RegisterMode::IDLE);
-  Modes mc; mc.push_back(RegisterMode::COUNT);
+  Modes ii, ic, ci, cc;
+  ii.push_back(RegisterMode::IDLE);
+  ii.push_back(RegisterMode::IDLE);
+  ic.push_back(RegisterMode::IDLE);
+  ic.push_back(RegisterMode::COUNT);
+  ci.push_back(RegisterMode::COUNT);
+  ci.push_back(RegisterMode::IDLE);
+  cc.push_back(RegisterMode::COUNT);
+  cc.push_back(RegisterMode::COUNT);
 
-  size_register_automaton sra(1);
+  size_register_automaton sra(2);
   
-  State s = sra.add_state(mi);
-  sra.set_initial_state(s);
-  sra.add_state(mi);
-  sra.add_state(mc);
-  sra.set_final_state(s);
+  State q0 = sra.add_state(ii);
+  State q1 = sra.add_state(ci);
+  State q2 = sra.add_state(cc);
+  State q3 = sra.add_state(ic);
+  State q4 = sra.add_state(ii);
 
-  sra.add_transition(0, 1, g2);
-  sra.add_transition(1, 2, g2);
-  sra.add_transition(2, 2, g1);
-  sra.add_transition(2, 0, g1);
+  sra.set_initial_state(q0);
+  sra.set_final_state(q4);
+
+  sra.add_transition(q0, q1, g2);
+  sra.add_transition(q1, q1, top);
+  sra.add_transition(q1, q2, g2);
+  sra.add_transition(q1, q4, top);
+  sra.add_transition(q2, q2, top);
+  sra.add_transition(q2, q3, top);
+  sra.add_transition(q3, q3, top);
+  sra.add_transition(q3, q1, g3);
 
   std::cout << sra << std::endl;
 
-  std::cout << "complement :\n" << !sra << std::endl;
+  // std::cout << "complement :\n" << !sra << std::endl;
 
-  std::cout << "product :\n" << (sra & sra) << std::endl;
+  // std::cout << "product :\n" << (sra & sra) << std::endl;
 
-  std::cout << "comcatenation :\n" << (sra + sra) << std::endl;
+  // std::cout << "comcatenation :\n" << (sra + sra) << std::endl;
 
+  std::cout << " Nonempty : " << (sra.is_nonempty() ? "Yes" : "No") << std::endl;
+
+  size_register_automaton insra =
+    size_register_automaton(sra_to_insra(sra));
+  
+  std::cout << insra << std::endl;
+
+  print_fa(sra_to_nfa(sra));
+  
   return 0;
 }

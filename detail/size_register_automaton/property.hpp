@@ -18,7 +18,10 @@ namespace atl::detail {
 
     propositional_fomula guard;
 
-    Guard() {}
+    Guard() {
+      int_variable cur("cur");
+      guard = (cur <= -1) & (cur >= -1);
+    }
 
     Guard(const propositional_fomula& formula) {
       guard = formula; minimize();
@@ -50,9 +53,16 @@ namespace atl::detail {
       return !is_compatible_with(rhs);
     }
 
+    // used for unordered_set
+    bool
+    operator<(const Guard& rhs) const {
+      return guard.to_string() < rhs.guard.to_string();
+    }
+
     bool
     is_compatible_with(const Guard& rhs) const {
       Bound b1 = get_bounds();
+      if(b1.first == -1) return false;
       Bound b2 = rhs.get_bounds();
       int top = std::max(b1.first, b1.second);
       top = std::max(top, std::max(b2.first, b2.second)) + 1;
@@ -187,6 +197,14 @@ namespace atl::detail {
     return modes;
   }
 
+}
+
+namespace std {
+  template<> struct hash<atl::detail::Guard> {
+    std::size_t operator()(atl::detail::Guard const& x) const {
+      return hash<string>{}(x.guard.to_string());
+    }
+  };
 }
 
 #endif /* atl_detail_property_hpp */

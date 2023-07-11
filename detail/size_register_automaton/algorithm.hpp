@@ -2,6 +2,10 @@
 #ifndef atl_detail_size_register_automaton_algorithm_hpp
 #define atl_detail_size_register_automaton_algorithm_hpp
 
+#include <queue>
+
+#include <fml/atl/finite_automaton/nondeterministic_finite_automaton.hpp>
+
 #include "size_register_automaton.hpp"
 
 namespace atl::detail {
@@ -129,10 +133,10 @@ namespace atl::detail {
         auto out_edge_iter = sra.out_transitions(*s_it);
         std::vector<Bound> bounds;
         bounds.push_back(std::make_pair(0, -1));
-        for(auto o_it = out_edge_iter.first;
-          o_it != out_edge_iter.second && !bounds.empty(); o_it++) {
-          const Guard& g2 = sra.get_property(*o_it);
-          Modes m2p = sra.get_property(o_it->m_target);
+        for(auto oet = out_edge_iter.first;
+          oet != out_edge_iter.second && !bounds.empty(); oet++) {
+          const Guard& g2 = sra.get_property(*oet);
+          Modes m2p = sra.get_property(oet->m_target);
           if(is_self_triggered(
             g1, mt1, g2, std::make_pair(ms, m2p)
           )) continue;
@@ -251,6 +255,347 @@ namespace atl::detail {
     }
 
     return out;
+  }
+
+  // Checking emptiness
+  enum CA { EQ, GE };
+  typedef std::pair<CA, int> CARegister;
+  typedef std::vector<CARegister> CARegisterSet;
+
+  typedef std::pair<State, CARegisterSet> CAState;
+  
+  int max_bound(const SRA& sra) {
+    int maxn = 0;
+    auto transition_iter = sra.transitions();
+    for(auto t_it = transition_iter.first;
+          t_it != transition_iter.second; t_it++) {
+      const Guard& g = sra.get_property(*t_it);
+      const Bound b = g.get_bounds();
+      maxn = std::max(maxn, std::max(b.first, b.second));
+    }
+    return maxn;
+  }
+
+  bool
+  is_compatible(
+    const CARegisterSet& cars,
+    const Modes& m,
+    const Modes& mp
+  ) {
+    assert(cars.size() == m.size());
+    assert(m.size() == mp.size());
+    for(int i = 0; i < m.size(); i++) {
+      if(m[i] == RegisterMode::IDLE) {
+        if(cars[i].first != CA::EQ || cars[i].second != 0)
+          return false;
+      } else if(mp[i] == RegisterMode::IDLE) {
+        if(cars[i].second != 1)
+          return false;
+      } else if(cars[i].second < 2)
+        return false;
+    }
+    return true;
+  }
+
+  bool
+  has_idle_to_count(const Modes& m, const Modes& mp) {
+    assert(m.size() == mp.size());
+    for(int i = 0; i < m.size(); i++)
+      if(m[i] == RegisterMode::IDLE &&
+          mp[i] == RegisterMode::COUNT)
+        return true;
+    return false;
+  }
+
+  std::vector<CARegisterSet>
+  compute_nu_set(
+    const int n_reg,
+    const Guard& guard,
+    const CARegisterSet& mu,
+    const Modes& m,
+    const Modes& mp
+  ) {
+    assert(n_reg == m.size());
+    assert(n_reg == mp.size());
+    assert(n_reg == mu.size());
+    std::vector<CARegisterSet> nu_set;
+    nu_set.push_back(CARegisterSet());
+    for(int i = 0; i < n_reg; i++) {
+      if(m[i] == RegisterMode::IDLE && mp[i] == RegisterMode::IDLE) {
+        for(auto& nu : nu_set) nu.push_back(std::make_pair(CA::EQ, 0));
+      } else if(m[i] == RegisterMode::COUNT && mp[i] == RegisterMode::IDLE) {
+        for(auto& nu : nu_set) nu.push_back(std::make_pair(CA::EQ, 0));
+      } else if(m[i] == RegisterMode::COUNT && mp[i] == RegisterMode::COUNT) {
+        if(mu[i].first == CA::EQ)
+          for(auto& nu : nu_set)
+            nu.push_back(std::make_pair(CA::EQ, mu[i].second - 1));
+        else {
+          int n = nu_set.size();
+          for(int j = 0; j < n; j++) {
+            CARegisterSet n_nu = nu_set[j];
+            n_nu.push_back(std::make_pair(CA::EQ, mu[i].second - 1));
+            nu_set.push_back(n_nu);
+            nu_set[j].push_back(std::make_pair(CA::GE, mu[i].second));
+          }
+        }
+      } else { // IDLE -> COUNT
+        Bound b = guard.get_bounds();
+        if(b.second != -1) {
+          int n = nu_set.size();
+          for(int k = 0; k < n; k++) {
+            CARegisterSet n_nu = nu_set[k];
+            for(int j = b.first; j <= b.second; j++) {
+              if(j == b.first)
+                nu_set[k].push_back(std::make_pair(CA::EQ, j));
+              else {
+                n_nu.push_back(std::make_pair(CA::EQ, j));
+                nu_set.push_back(n_nu);
+                n_nu.pop_back();
+              }
+            }
+          }
+        } else {
+          if(b.first > 1)
+            for(auto& nu : nu_set)
+              nu.push_back(std::make_pair(CA::GE, b.first));
+          else {
+            int n = nu_set.size();
+            for(int j = 0; j < n; j++) {
+              CARegisterSet n_nu = nu_set[j];
+              n_nu.push_back(std::make_pair(CA::EQ, 1));
+              nu_set.push_back(n_nu);
+              nu_set[j].push_back(std::make_pair(CA::GE, 2));
+            }
+          }
+        }
+      }
+    }
+    return nu_set;
+  }
+
+  SRA
+  sra_to_insra(const SRA& sra) {
+    propositional_fomula top = int_variable("cur") >= 0;
+
+    const int n_reg = sra.num_registers();
+    SRA insra(n_reg);
+    int maxn = max_bound(sra);
+    
+    std::map<CAState, State> castate_map;
+    CAState q0_p;
+    q0_p.first = sra.initial_state();
+    for(int i = 0; i < n_reg; i++)
+      q0_p.second.push_back(std::make_pair(CA::EQ, 0));
+    Modes idles;
+    for(int i = 0; i < n_reg; i++)
+      idles.push_back(RegisterMode::IDLE);
+    castate_map[q0_p] = insra.add_state(idles);
+    insra.set_initial_state(castate_map[q0_p]);
+
+    std::queue<CAState> castates_queue;
+    castates_queue.push(q0_p);
+    while(!castates_queue.empty()) {
+      CAState cas = castates_queue.front(); castates_queue.pop();
+      State s = cas.first;
+      const CARegisterSet& mu = cas.second;
+      const State in_s = castate_map[cas];
+
+      if(sra.is_final_state(s))
+        insra.set_final_state(castate_map[cas]);
+      
+      auto out_edges_iter = sra.out_transitions(cas.first);
+      for(auto oet = out_edges_iter.first;
+            oet != out_edges_iter.second; oet++) {
+        const Modes& m = sra.get_property(s);
+        State t = sra.target(*oet);
+        const Modes& mp = sra.get_property(t);
+        if(!is_compatible(cas.second, m, mp)) continue;
+        Guard in_g;
+        if(has_idle_to_count(m, mp)) in_g = Guard(top);
+        else in_g = sra.get_property(*oet);
+        
+        std::vector<CARegisterSet> nu_set
+          = compute_nu_set(
+            n_reg, sra.get_property(*oet), mu, m, mp);
+
+        for(auto nu : nu_set) {
+          CAState ca_t = std::make_pair(t, nu);
+          if(castate_map.find(ca_t) == castate_map.end()) {
+            castate_map[ca_t] = insra.add_state(mp);
+            castates_queue.push(ca_t);
+          }
+          State in_t = castate_map[ca_t];
+          insra.add_transition(in_s, in_t, in_g);
+        }
+      }
+    }
+    return insra;    
+  }
+
+  typedef nondeterministic_finite_automaton<Guard> nfa_sra;
+  typedef int Register;
+
+  struct EquivalenceClass {
+    std::vector<Register> eq_rel;
+
+    EquivalenceClass(int n) {
+      eq_rel.resize(n);
+      for(int i = 0; i < n; i++)
+        eq_rel[i] = i;
+    }
+
+    EquivalenceClass(const EquivalenceClass& x)
+      : eq_rel(x.eq_rel) {}
+
+    bool
+    operator==(const EquivalenceClass& rhs) const {
+      EquivalenceClass eq1(*this), eq2(rhs);
+      for(int i = 0; i < eq_rel.size(); i++)
+        if(eq1.find_class(i) != eq2.find_class(i))
+          return false;
+      return true;
+    }
+
+    bool
+    operator<(const EquivalenceClass& rhs) const {
+      EquivalenceClass eq1(*this), eq2(rhs);
+      for(int i = 0; i < eq_rel.size(); i++) {
+        Register c1 = eq1.find_class(i);
+        Register c2 = eq2.find_class(i);
+        if(c1 < c2) return true;
+        if(c1 > c2) return false;
+      }
+      return false;
+    }
+
+    void
+    merge(Register r1, Register r2) {
+      Register c1 = find_class(r1);
+      Register c2 = find_class(r2);
+      if(c1 == c2) return;
+      if(c1 < c2) eq_rel[c2] = c1;
+      else eq_rel[c1] = c2;
+    }
+
+    void
+    split(Register r) {
+      Register c = find_class(r);
+      for(int i = 0; i < eq_rel.size(); i++)
+        if(find_class(i) == c)
+          eq_rel[i] = i;
+    }
+
+    Register
+    find_class(Register r) {
+      return (r == eq_rel[r] ? r :
+        eq_rel[r] = find_class(eq_rel[r]));
+    }
+
+  };
+
+  bool
+  is_compatible(const Modes& m, EquivalenceClass& eq) {
+    int n = m.size();
+    assert(eq.eq_rel.size() == n);
+    for(int i = 0; i < n; i++)
+      for(int j = i + 1; j < n; j++)
+        if(eq.find_class(i) == eq.find_class(j))
+          if(m[i] != m[j]) return false;
+    return true;
+  }
+
+  typedef std::pair<State, EquivalenceClass> EQState;
+
+  nfa_sra
+  insra_to_nfa(const SRA& insra) {
+    int n_reg = insra.num_registers();
+
+    std::map<EQState, State> eqstate_nfastate_map;
+    State insra_q0 = insra.initial_state();
+    EquivalenceClass sim_id(n_reg);
+    EQState eqs_ini = std::make_pair(insra_q0, sim_id);
+
+    nfa_sra nfa;
+    State q0 = nfa.add_state();
+    nfa.set_initial_state(q0);
+    eqstate_nfastate_map[eqs_ini] = q0;
+
+    std::queue<EQState> eqstates_queue;
+    eqstates_queue.push(eqs_ini);
+    while(!eqstates_queue.empty()) {
+      EQState eqs = eqstates_queue.front();
+      eqstates_queue.pop();
+      State s = eqs.first;
+      EquivalenceClass& sim = eqs.second;
+      const Modes& m = insra.get_property(s);
+
+      assert(is_compatible(m, sim));
+
+      if(insra.is_final_state(s))
+        nfa.set_final_state(eqstate_nfastate_map[eqs]);
+
+      auto out_edges_iter = insra.out_transitions(s);
+      for(auto oet = out_edges_iter.first;
+            oet != out_edges_iter.second; oet++) {
+        State t = insra.target(*oet);
+        Guard symbol = insra.get_property(*oet);
+        const Modes& mp = insra.get_property(t);
+        EquivalenceClass simp(sim);
+
+        std::vector<Register> idle_to_count;
+        for(int i = 0; i < n_reg; i++)
+          if(m[i] == RegisterMode::IDLE && mp[i] == RegisterMode::COUNT)
+            idle_to_count.push_back(i);
+        for(int i = 1; i < idle_to_count.size(); i++)
+          simp.merge(idle_to_count[0], idle_to_count[i]);
+        
+        for(int i = 0; i < n_reg; i++)
+          if(m[i] == RegisterMode::COUNT && mp[i] == RegisterMode::IDLE)
+            simp.split(i);
+        
+        if(!is_compatible(mp, simp)) continue;
+
+        EQState eqt = std::make_pair(t, simp);
+        if(eqstate_nfastate_map.find(eqt) == eqstate_nfastate_map.end()) {
+          eqstate_nfastate_map[eqt] = nfa.add_state();
+          eqstates_queue.push(eqt);
+        }
+        State nt = eqstate_nfastate_map[eqt];
+        nfa.add_transition(s, nt, symbol);
+      }
+    }
+    return nfa;
+  }
+
+  nfa_sra
+  sra_to_nfa(const SRA& sra) {
+    return insra_to_nfa(sra_to_insra(sra));
+  }
+
+  bool
+  sra_nonempty(const SRA& sra) {
+    nfa_sra nfa = sra_to_nfa(sra);
+    
+    std::unordered_map<State, bool> has_vis;
+    std::queue<State> states_queue;
+    states_queue.push(nfa.initial_state());
+    while(!states_queue.empty()) {
+      State s = states_queue.front(); states_queue.pop();
+      if(has_vis[s]) continue;
+      has_vis[s] = true;
+
+      if(nfa.final_state_set().find(s)
+          != nfa.final_state_set().end())
+        return true;
+      auto out_edges_iter = nfa.out_transitions(s);
+      for(auto oet = out_edges_iter.first;
+            oet != out_edges_iter.second; oet++) {
+        State t = nfa.target(*oet);
+        if(has_vis[t]) continue;
+        states_queue.push(t);
+      }
+    }
+    return false;
   }
 
 }

@@ -43,6 +43,11 @@ namespace atl {
       return sra_type(concatenate(*this, rhs));
     }
 
+    bool
+    is_nonempty() const {
+      return sra_nonempty(*this);
+    }
+
     friend std::ostream&
     operator<<(std::ostream& os, const sra_type& x) {
       os << " Deterministic : " << (is_deterministic(x) ? "Yes" : "No") << std::endl;
